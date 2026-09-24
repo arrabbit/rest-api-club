@@ -5,7 +5,7 @@ REST API for campus clubs offering activities such as pottery workshops,  board 
 - **File Headers**: Each .py and .hs file must contain a header comment including a summary of the file's purpose, authors, and date
 - **Function Documentation**: Every function must have an appropriate docstring (Python) or Haddock comment (Haskell) containing the function's purpose, any input parameters, and return value.
 - **Inline Comments**Inline comments must be included to explain any confusing or tricky logic.
-- **Modularity**: Individual functions should be kept under 25–30 lines whenever possible to maintain code abstraction and improve readability.
+- **Modularity**: Individual functions should have a single purpose and should be kept under 25–30 lines whenever possible to maintain code abstraction and improve readability.
 - **Coding Style**: Variables and functions must be in snake_case. Classes should be in PascalCase.
 
 ## Git Repo Policy
