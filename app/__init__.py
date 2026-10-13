@@ -4,7 +4,7 @@ Purpose: Application factory. Builds the Flask app, registers JSON error
          handlers, and exposes a health route (GET /api) like the one from
          the Sept 15 activity. Temporary skeleton so the VM can be deployed;
          E owns this file and adds the event and registration blueprints.
-Authors: Anna Running Rabbit, Team member E (owner)
+Authors: Precious (owner), Anna Running Rabbit (created skeleton)
 Date created:         2026-10-13
 Date last editted:    2026-10-13
 """
