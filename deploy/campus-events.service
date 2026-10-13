@@ -1,0 +1,27 @@
+# campus-events.service
+# Purpose: Runs the API with gunicorn under systemd so it starts on boot
+#          and restarts if it crashes (needed for the reboot evidence).
+# Authors: Anna Running Rabbit
+# Date Created:      2026-10-13
+# Date Last Editted: 2026-10-13
+#
+# Install (VM): sudo cp deploy/campus-events.service /etc/systemd/system/
+#               sudo systemctl daemon-reload
+#               sudo systemctl enable --now campus-events
+# Replace YOUR_VM_USER with your Linux username on the VM (run: whoami).
+
+[Unit]
+Description=Campus Events API
+After=network.target mysql.service
+Requires=mysql.service
+
+[Service]
+User=YOUR_VM_USER
+WorkingDirectory=/opt/campus-events
+Environment=ENV_FILE=/etc/campus-events/campus.env
+Environment=FLASK_DEBUG=0
+ExecStart=/opt/campus-events/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:5000 "app:create_app()"
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
