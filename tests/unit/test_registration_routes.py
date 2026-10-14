@@ -4,13 +4,19 @@ Author: Joseph (JD-d3v)
 Date: 2026-10-14
 """
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 import pytest
 from flask import Flask
 
 from app.errors import register_error_handlers
-from app.routes.registrations import create_registration_blueprint
+from app.routes.registrations import (
+    create_registration_blueprint,
+    get_registration_rejection,
+    has_available_capacity,
+    has_event_started,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -145,3 +151,116 @@ def test_list_registrations_hides_repository_errors(client, repository):
         }
     }
     assert "private_column" not in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize(
+    "event_exists, participant_exists, already_registered, expected_rejection",
+    [
+        (True, True, False, None),
+        (False, True, False, "missing_event"),
+        (True, False, False, "missing_participant"),
+        (True, True, True, "duplicate_registration"),
+        (False, False, False, "missing_event"),
+        (False, True, True, "missing_event"),
+        (True, False, True, "missing_participant"),
+    ],
+)
+def test_registration_rejection_checks_existence_and_duplicates(
+    event_exists, participant_exists, already_registered, expected_rejection
+):
+    """Check supplied existence/duplicate flags against expected_rejection; return None."""
+    rejection = get_registration_rejection(
+        event_exists=event_exists,
+        participant_exists=participant_exists,
+        already_registered=already_registered,
+    )
+
+    assert rejection == expected_rejection
+
+
+@pytest.mark.parametrize(
+    "capacity, registration_count, expected_available",
+    [
+        (1, 0, True),
+        (1, 1, False),
+        (2, 0, True),
+        (2, 1, True),
+        (2, 2, False),
+        (2, 3, False),
+        (10, 9, True),
+        (10, 10, False),
+    ],
+)
+def test_available_capacity_checks_last_place_and_full_event(
+    capacity, registration_count, expected_available
+):
+    """Check supplied capacity/count against expected_available; return None."""
+    assert (
+        has_available_capacity(capacity=capacity, registration_count=registration_count)
+        is expected_available
+    )
+
+
+@pytest.mark.parametrize(
+    "time_offset, expected_started",
+    [
+        (timedelta(days=-1), False),
+        (timedelta(microseconds=-1), False),
+        (timedelta(microseconds=1), True),
+        (timedelta(days=1), True),
+    ],
+)
+def test_event_start_checks_before_and_after_boundary(time_offset, expected_started):
+    """Check a supplied offset from start against expected_started; return None."""
+    event_start_time = datetime(2026, 12, 1, 18, 0, tzinfo=timezone.utc)
+    current_time = event_start_time + time_offset
+
+    assert (
+        has_event_started(event_start_time=event_start_time, current_time=current_time)
+        is expected_started
+    )
+
+
+def test_event_start_rejects_exact_start_under_proposed_policy():
+    """Check the provisional exact-start policy with no inputs; return None."""
+    event_start_time = datetime(2026, 12, 1, 18, 0, tzinfo=timezone.utc)
+
+    assert has_event_started(
+        event_start_time=event_start_time, current_time=event_start_time
+    )
+
+
+@pytest.mark.parametrize("offset_hours", [-7, 0, 5.5])
+def test_event_start_compares_instants_across_timezones(offset_hours):
+    """Check the same instant in supplied UTC offsets; return None."""
+    event_start_time = datetime(2026, 12, 1, 18, 0, tzinfo=timezone.utc)
+    current_timezone = timezone(timedelta(hours=offset_hours))
+    just_before_start = (event_start_time - timedelta(seconds=1)).astimezone(
+        current_timezone
+    )
+    just_after_start = (event_start_time + timedelta(seconds=1)).astimezone(
+        current_timezone
+    )
+
+    assert not has_event_started(
+        event_start_time=event_start_time, current_time=just_before_start
+    )
+    assert has_event_started(
+        event_start_time=event_start_time, current_time=just_after_start
+    )
+
+
+@pytest.mark.parametrize(
+    "naive_start, naive_current", [(True, False), (False, True), (True, True)]
+)
+def test_event_start_rejects_datetimes_without_timezone(naive_start, naive_current):
+    """Remove timezone per supplied flags and check rejection; return None."""
+    event_start_time = datetime(2026, 12, 1, 18, 0, tzinfo=timezone.utc)
+    current_time = event_start_time - timedelta(seconds=1)
+    if naive_start:
+        event_start_time = event_start_time.replace(tzinfo=None)
+    if naive_current:
+        current_time = current_time.replace(tzinfo=None)
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        has_event_started(event_start_time=event_start_time, current_time=current_time)

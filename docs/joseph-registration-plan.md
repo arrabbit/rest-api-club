@@ -11,6 +11,7 @@ not evidence that the team has approved every detail below.
 
 - [x] Draft the three registration operations and test checklist.
 - [x] Implement registration listing with isolated route tests.
+- [x] Implement independent resource, duplicate, capacity, and start-time checks.
 - [ ] Implement booking and its unit tests.
 - [ ] Implement cancellation and its unit tests.
 - [ ] Connect shared validation, repository functions, and application factory.
@@ -129,6 +130,43 @@ registered only in the isolated tests until this handoff is complete. There is
 no in-memory production fallback.
 
 ## Test checklist
+
+Independent booking-rule checks are now implemented in Joseph's registration
+module. They take ordinary booleans, integers, and timezone-aware datetimes;
+they make no database calls and require no Flask application/request context.
+The module still imports Flask for its existing route definitions.
+
+- `get_registration_rejection(...)` checks existence and duplicates. Its return
+  strings are internal reasons, not committed public API error codes. Routes
+  will translate them into the agreed `ApiError` responses later.
+- `has_available_capacity(...)` compares a validated capacity with the current
+  registration count. It assumes a positive integer capacity and nonnegative
+  integer count; shared validation and repository code provide those values.
+- `has_event_started(...)` takes both times explicitly, so tests do not depend
+  on the actual date or system timezone. It refuses timezone-naive datetime
+  objects, including two naive objects that Python would otherwise compare.
+
+Existence/duplicate precedence remains the proposed order in this draft. The
+exact-start policy has its own clearly named test so it can be changed without
+rewriting tests for before/after start. Equivalent instants with different UTC
+offsets are tested as well. String parsing and external field names are left to
+the future route/validation connection.
+
+These helpers do not create/delete registrations, enforce an HTTP error code,
+or reserve capacity. POST/DELETE routes and a stateful test fake are still
+future work; the booking-to-cancellation walkthrough is not implemented yet.
+
+| Independent rule | Executable tests |
+| --- | --- |
+| Event/participant existence and duplicates | `test_registration_rejection_checks_existence_and_duplicates` |
+| Empty event, final place, full/overfull event | `test_available_capacity_checks_last_place_and_full_event` |
+| Just before/after start | `test_event_start_checks_before_and_after_boundary` |
+| Exact-start provisional policy | `test_event_start_rejects_exact_start_under_proposed_policy` |
+| Equivalent instants in different timezones | `test_event_start_compares_instants_across_timezones` |
+| Reject naive datetimes | `test_event_start_rejects_datetimes_without_timezone` |
+
+The endpoint checklist below remains separate: helper checks alone do not prove
+that an HTTP request is validated, a database write occurs, or a write is avoided.
 
 | Case | Expected behavior | Status/test |
 | --- | --- | --- |
