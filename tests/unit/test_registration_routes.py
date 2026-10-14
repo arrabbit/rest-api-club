@@ -18,6 +18,7 @@ from app.routes.registrations import (
     has_available_capacity,
     has_event_started,
     to_utc_datetime,
+    utc_now,
 )
 
 pytestmark = pytest.mark.unit
@@ -675,3 +676,44 @@ def test_cancel_allowed_after_event_starts(fake_repository):
     )
 
     assert cancel(after_start, 4, registration_id).status_code == 204
+
+
+def test_capacity_two_walkthrough(fake_client):
+    """Spec example: two book, third rejected, one cancels, third books; return None."""
+    first = book(fake_client, 4, 1)
+    second = book(fake_client, 4, 2)
+    rejected = book(fake_client, 4, 3)
+    cancelled = cancel(fake_client, 4, first.get_json()["id"])
+    third = book(fake_client, 4, 3)
+    listing = fake_client.get("/api/v1/events/4/registrations").get_json()["data"]
+
+    assert [first.status_code, second.status_code] == [201, 201]
+    assert rejected.status_code == 409
+    assert rejected.get_json()["error"]["code"] == "EVENT_FULL"
+    assert cancelled.status_code == 204
+    assert third.status_code == 201
+    assert sorted(row["participantName"] for row in listing) == [
+        "Alex Chen",
+        "Sam Rivera",
+    ]
+
+
+def test_rebook_after_cancel_creates_new_registration(fake_client, fake_repository):
+    """Book, cancel and book again as one participant; expect a new row; return None."""
+    first_id = book(fake_client, 4, 1).get_json()["id"]
+    cancel(fake_client, 4, first_id)
+
+    rebooked = book(fake_client, 4, 1)
+
+    assert rebooked.status_code == 201
+    assert rebooked.get_json()["id"] != first_id
+    assert fake_repository.count_registrations(4) == 1
+
+
+def test_utc_now_returns_current_aware_utc_time():
+    """Check the production clock is timezone-aware UTC and current; return None."""
+    before = datetime.now(timezone.utc)
+    now = utc_now()
+
+    assert now.utcoffset() == timedelta(0)
+    assert before <= now <= datetime.now(timezone.utc)
