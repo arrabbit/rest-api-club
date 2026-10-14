@@ -26,12 +26,16 @@ def event_to_json(row: dict) -> dict:
         start_time = start_time.replace(tzinfo=timezone.utc)
     else:
         start_time = start_time.astimezone(timezone.utc)
+
     spots_left = row["capacity"] - row["registered_count"]
     
     return {
         "id": row["id"],
         "title": row["title"],
-        "location": row["location"],
+        "country": row["country"], # addition in place of location
+        "province": row["province"], # addition in place of location
+        "city": row["city"], # addition in place of location
+        "address": row["address"], # addition in place of location
         "startTime": start_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "capacity": row["capacity"],
         "registeredCount": row["registered_count"],
@@ -51,4 +55,9 @@ def parse_event_id(raw: str) -> int:
     Raises:
         ApiError: 404 EVENT_NOT_FOUND if raw is not a positive whole number.
     """
-    # TODO
+    if not raw.isdecimal():
+        raise ApiError(404, "EVENT_NOT_FOUND", f"No event with id {raw}.", {"eventId": raw})
+    event_id = int(raw)
+    if event_id < 1:
+        raise ApiError(404, "EVENT_NOT_FOUND", f"No event with id {raw}.", {"eventId": raw})
+    return event_id
