@@ -21,22 +21,29 @@ def parse_participant_id(body) -> int:
         int: The participant ID.
 
     Raises:
-        ApiError: 400 for any other body (wrong type, extra or missing fields).
+        ApiError: 400 naming the problem: not an object, unknown fields
+            (listed in details), or a missing/invalid participantId.
     """
-    # type() is used rather than isinstance() so that True/False are rejected.
-    if (
-        not isinstance(body, dict)
-        or set(body) != {"participantId"}
-        or type(body["participantId"]) is not int
-        or body["participantId"] < 1
-    ):
+    if not isinstance(body, dict):
+        raise ApiError(400, "BAD_REQUEST", "Request body must be a JSON object.")
+    unknown_fields = sorted(set(body) - {"participantId"})
+    if unknown_fields:
         raise ApiError(
             400,
             "BAD_REQUEST",
-            'Body must be {"participantId": <positive integer>}.',
-            {"field": "participantId"},
+            "Request body has unknown fields.",
+            {"fields": unknown_fields},
         )
-    return body["participantId"]
+    participant_id = body.get("participantId")
+    # type() is used rather than isinstance() so that True/False are rejected.
+    if type(participant_id) is not int or participant_id < 1:
+        raise ApiError(
+            400,
+            "BAD_REQUEST",
+            "participantId is required and must be a positive integer.",
+            {"fields": ["participantId"]},
+        )
+    return participant_id
 
 
 def require_event(repository, event_id: int) -> dict:
@@ -130,13 +137,34 @@ def create_registration_blueprint(repository, clock=lambda: datetime.now(timezon
 
     @blueprint.get("/events/<int:event_id>/registrations")
     def list_registrations(event_id: int):
-        """Return 200 with event_id's registrations, including participant names."""
+        """List an event's registrations, including participant names.
+
+        Args:
+            event_id: Event ID from the request path.
+
+        Returns:
+            Response: JSON {"data": [...]} with status 200.
+
+        Raises:
+            ApiError: 404 EVENT_NOT_FOUND if the event does not exist.
+        """
         require_event(repository, event_id)
         return jsonify({"data": repository.list_registrations_with_names(event_id)})
 
     @blueprint.post("/events/<int:event_id>/registrations")
     def register_participant(event_id: int):
-        """Book the JSON body's participant into event_id; return 201 and the row."""
+        """Register the participant named in the JSON body for an event.
+
+        Args:
+            event_id: Event ID from the request path.
+
+        Returns:
+            tuple: JSON registration and status 201.
+
+        Raises:
+            ApiError: 400 bad body; 404 missing event or participant;
+                409 duplicate, started or full event.
+        """
         # get_json() raises 415 (not JSON) or 400 (malformed); errors.py formats both.
         participant_id = parse_participant_id(request.get_json())
         check_registration_allowed(repository, event_id, participant_id, clock())
@@ -144,7 +172,19 @@ def create_registration_blueprint(repository, clock=lambda: datetime.now(timezon
 
     @blueprint.delete("/events/<int:event_id>/registrations/<int:registration_id>")
     def cancel_registration(event_id: int, registration_id: int):
-        """Delete registration_id from event_id; return 204, or 404 if absent."""
+        """Cancel a registration by deleting its row, which frees one place.
+
+        Args:
+            event_id: Event ID from the request path.
+            registration_id: Registration ID from the request path.
+
+        Returns:
+            tuple: Empty body and status 204.
+
+        Raises:
+            ApiError: 404 if the event is missing, or the registration is
+                missing, already cancelled or belongs to another event.
+        """
         require_event(repository, event_id)
         # Deleting the row (no stored counter) means a repeated cancel finds
         # nothing and cannot free a second place. Cancelling after start is allowed.

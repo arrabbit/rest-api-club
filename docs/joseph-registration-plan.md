@@ -157,7 +157,7 @@ clock, so start-time tests never depend on the real date.
 | Repository failure | Generic 500, no internal details | `test_repository_failure_returns_generic_500` |
 | Non-integer path IDs | JSON 404 | `test_non_integer_path_ids_return_json_404` |
 | Valid booking | 201, one more row | `test_book_creates_registration` |
-| Bad body (11 cases) | 400, no row | `test_book_rejects_invalid_body` |
+| Bad body (12 cases) | 400 naming the bad fields in `details.fields`, no row | `test_book_rejects_invalid_body` |
 | Malformed JSON / not JSON | 400 / 415 JSON error | `test_book_rejects_malformed_or_non_json` |
 | Missing event or participant | 404, no row | `test_book_missing_event_or_participant_returns_404` |
 | Duplicate booking | 409, count unchanged | `test_book_duplicate_returns_409` |
@@ -230,7 +230,7 @@ Tests: `test_cancel_twice_does_not_free_extra_place`,
 
 ## Local verification results (2026-10-14)
 
-- `python -m pytest tests/unit -q`: 47 passed (after simplification).
+- `python -m pytest tests/unit -q`: 48 passed.
 - Branch coverage of `app/routes/registrations.py`: 100%.
 - `scripts/demo_deployed.sh` against a local server using the fake repository:
   all 5 steps returned the expected status; a second run also passed, and a

@@ -177,6 +177,7 @@ def test_repository_failure_returns_generic_500(client, repo, monkeypatch):
     """Make the repository crash; expect a 500 that hides the details; return None."""
 
     def crash(event_id):
+        """Ignore event_id and raise a database-like error; never returns."""
         raise RuntimeError("SELECT private_column FROM internal_table")
 
     monkeypatch.setattr(repo, "list_registrations_with_names", crash)
@@ -218,24 +219,32 @@ def test_book_creates_registration(client, repo):
     assert repo.count_registrations(4) == 1
 
 
+NOT_AN_OBJECT = None
+BAD_ID = {"fields": ["participantId"]}
+
+
 @pytest.mark.parametrize(
-    "body",
+    "body, expected_details",
     [
-        {},
-        {"participantId": None},
-        {"participantId": "1"},
-        {"participantId": 1.0},
-        {"participantId": True},
-        {"participantId": 0},
-        {"participantId": -1},
-        {"participantId": 1, "registeredAt": "2026-01-01T00:00:00Z"},
-        [1],
-        1,
-        None,
+        ({}, BAD_ID),
+        ({"participantId": None}, BAD_ID),
+        ({"participantId": "1"}, BAD_ID),
+        ({"participantId": 1.0}, BAD_ID),
+        ({"participantId": True}, BAD_ID),
+        ({"participantId": 0}, BAD_ID),
+        ({"participantId": -1}, BAD_ID),
+        ({"participantID": 1}, {"fields": ["participantID"]}),
+        (
+            {"participantId": 1, "registeredAt": "x", "a": 1},
+            {"fields": ["a", "registeredAt"]},
+        ),
+        ([1], NOT_AN_OBJECT),
+        (1, NOT_AN_OBJECT),
+        (None, NOT_AN_OBJECT),
     ],
 )
-def test_book_rejects_invalid_body(client, repo, body):
-    """Send a supplied invalid JSON body; expect 400 and no row; return None."""
+def test_book_rejects_invalid_body(client, repo, body, expected_details):
+    """Send a supplied invalid body; expect 400 naming expected_details; return None."""
     # json.dumps so that None is sent as the JSON literal null, not "no body".
     response = client.post(
         "/api/v1/events/4/registrations",
@@ -245,6 +254,7 @@ def test_book_rejects_invalid_body(client, repo, body):
 
     assert response.status_code == 400
     assert error_code(response) == "BAD_REQUEST"
+    assert response.get_json()["error"].get("details") == expected_details
     assert repo.count_registrations(4) == 0
 
 
