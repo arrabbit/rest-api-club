@@ -12,12 +12,18 @@ not evidence that the team has approved every detail below.
 - [x] Draft the three registration operations and test checklist.
 - [x] Implement registration listing with isolated route tests.
 - [x] Implement independent resource, duplicate, capacity, and start-time checks.
-- [ ] Implement booking and its unit tests.
-- [ ] Implement cancellation and its unit tests.
+- [x] Implement booking and its unit tests (stateful fake repository, fixed clock).
+- [x] Implement cancellation and its unit tests.
+- [x] Capacity-2 walkthrough and rebook scenarios as unit tests.
+- [x] Write the demo script (`scripts/demo_deployed.sh`); verified locally only.
+- [x] Draft report notes: cancellation approach and defect log (below).
 - [ ] Connect shared validation, repository functions, and application factory.
+      Blocked: Precious (`validation.py`, `create_app()`), Darren (`repository.py`).
 - [ ] Run booking integration tests against the separate MySQL test database.
-- [ ] Write and run the deployed API demonstration script.
-- [ ] Supply report notes and perform the fresh-clone README walkthrough.
+      Blocked: Darren's schema, seed, and integration fixture.
+- [ ] Run the demo script against the deployed API. Blocked: Anna's VM + seed data.
+- [ ] Decide the POST `Location` header with Jordan (open question below).
+- [ ] Perform the fresh-clone README walkthrough (Oct 17). Blocked: everyone.
 
 Events, participant management, SQL implementation, and deployment configuration
 remain with their respective owners. Concurrency control is outside assignment
@@ -152,9 +158,14 @@ rewriting tests for before/after start. Equivalent instants with different UTC
 offsets are tested as well. String parsing and external field names are left to
 the future route/validation connection.
 
-These helpers do not create/delete registrations, enforce an HTTP error code,
-or reserve capacity. POST/DELETE routes and a stateful test fake are still
-future work; the booking-to-cancellation walkthrough is not implemented yet.
+The POST and DELETE routes call these helpers. Unit route tests use
+`FakeRegistrationRepository` (in the test file), an in-memory class with the
+agreed repository signatures, and an injected clock (`create_registration_blueprint(
+repository, clock)`) so start-time tests never depend on the real date.
+`parse_participant_id` is a local validator; swap it for Precious's
+`validation.py` function once that exists. `to_utc_datetime` accepts an ISO
+string with a timezone or a MySQL datetime (naive is treated as UTC, matching
+the connection's `time_zone="+00:00"`), so either repository choice works.
 
 | Independent rule | Executable tests |
 | --- | --- |
@@ -176,19 +187,20 @@ that an HTTP request is validated, a database write occurs, or a write is avoide
 | Invalid event path ID | 404; no repository calls | `test_list_registrations_rejects_invalid_event_id` (parameterized) |
 | List different events sequentially | Each request uses its own event ID | `test_list_registrations_keeps_events_separate` |
 | Repository failure | Generic 500 without internal details | `test_list_registrations_hides_repository_errors` |
-| Valid booking | 201, server timestamp, one additional row | Planned unit + integration |
-| Bad participant ID/body | 400, no insertion | Planned parameterized unit |
-| Malformed JSON/wrong media type | 400/415 shared JSON error | Planned unit |
-| Missing event/participant | 404, no insertion | Planned unit + integration |
-| Duplicate booking | 409, count unchanged | Planned unit + integration |
-| Count capacity minus one / at capacity | Final place succeeds / next fails | Planned unit + integration |
-| Before / exactly at / after start | Success / rejection / rejection (boundary proposed) | Planned unit using controlled time |
-| Successful cancellation | 204, row removed, one place available | Planned unit + integration |
-| Missing or wrong-event registration | 404, no unrelated row deleted | Planned unit + integration |
-| Repeated cancellation | 404, no extra capacity | Planned unit + integration |
-| Rebook after cancel | Success if open and space remains | Planned unit + integration |
-| Capacity-2 walkthrough | Two book, third fails, cancel, third succeeds | Planned unit + integration |
-| Cancellation after start | Allowed under team-plan assumption | Planned unit + integration |
+| Two rules broken at once | Earlier rule's code wins | `test_register_reports_rules_in_agreed_order` |
+| Valid booking | 201, server timestamp, one additional row | `test_register_creates_registration`; integration planned |
+| Bad participant ID/body | 400, no insertion | `test_register_rejects_invalid_body` (13 cases) |
+| Malformed JSON/wrong media type | 400/415 shared JSON error | `test_register_rejects_malformed_json`, `test_register_rejects_non_json_content_type` |
+| Missing event/participant | 404, no insertion | `test_register_rejects_missing_records`, `test_register_rejects_invalid_event_path`; integration planned |
+| Duplicate booking | 409, count unchanged | `test_register_rejects_duplicate`; integration planned |
+| Count capacity minus one / at capacity | Final place succeeds / next fails | `test_register_rejects_full_event`; integration planned |
+| Before / exactly at / after start | Success / rejection / rejection (boundary proposed) | `test_register_checks_start_time_boundary`, `test_register_accepts_naive_mysql_start_time` |
+| Successful cancellation | 204, row removed, one place available | `test_cancel_removes_registration`; integration planned |
+| Missing or wrong-event registration | 404, no unrelated row deleted | `test_cancel_rejects_registration_from_other_event`, `test_cancel_rejects_missing_event`, `test_cancel_rejects_invalid_or_unknown_registration`; integration planned |
+| Repeated cancellation | 404, no extra capacity | `test_cancel_twice_does_not_release_extra_place`; integration planned |
+| Rebook after cancel | Success if open and space remains | `test_rebook_after_cancel_creates_new_registration`; integration planned |
+| Capacity-2 walkthrough | Two book, third fails, cancel, third succeeds | `test_capacity_two_walkthrough`; integration planned |
+| Cancellation after start | Allowed under team-plan assumption | `test_cancel_allowed_after_event_starts`; integration planned |
 
 Integration tests must use Darren's separate, resettable test database fixture.
 Unit tests must run without MySQL, credentials, or a deployed API.
@@ -225,3 +237,29 @@ SQL filtering or persistence; the real database integration tests must do that.
 No discovered defect is claimed in this initial milestone. Record real failures
 and fixes as they occur. Use October 17 for the fresh-clone walkthrough, following
 the team plan's timeline (the role card separately mentions October 16).
+
+## Report notes (draft for Precious)
+
+**Cancellation approach.** `DELETE /api/v1/events/{eventId}/registrations/{registrationId}`
+deletes the registration row and returns 204. Places left are always computed as
+`capacity - COUNT(registrations)`; nothing is stored as a counter. A second
+cancel finds no row and returns 404 `REGISTRATION_NOT_FOUND`, so it cannot
+release a place twice. The registration must belong to the event in the path,
+so one event's URL cannot cancel another event's booking. Cancelling after the
+event starts is allowed (assumption: the spec only blocks registering after start).
+Tests: `test_cancel_twice_does_not_release_extra_place`,
+`test_cancel_rejects_registration_from_other_event`, `test_capacity_two_walkthrough`.
+
+## Defect log
+
+| Date | Found by | Defect | Fix |
+| --- | --- | --- | --- |
+| 2026-10-14 | `test_register_rejects_invalid_body[None]` | The test meant to send the JSON literal `null`, but Flask's test client treats `json=None` as "no body", so the request had no content type and correctly got 415 instead of the 400 being tested. The `null` case was silently untested. | Encode the body with `json.dumps` and set `application/json` explicitly. This is a defect in a test, not in the route. |
+
+## Local verification results (2026-10-14)
+
+- `python -m pytest tests/unit -q`: 94 passed.
+- Branch coverage of `app/routes/registrations.py`: 100%.
+- `scripts/demo_deployed.sh` against a local server using the fake repository:
+  all 7 steps returned the expected status; a second run also passed.
+
