@@ -4,6 +4,7 @@ Author: Joseph (JD-d3v)
 Date: 2026-10-14
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
@@ -16,9 +17,135 @@ from app.routes.registrations import (
     get_registration_rejection,
     has_available_capacity,
     has_event_started,
+    to_utc_datetime,
 )
 
 pytestmark = pytest.mark.unit
+
+# Fixed "now" for booking tests, so results never depend on the real date.
+FIXED_NOW = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+FUTURE_START = "2026-12-01T18:00:00Z"
+
+
+class FakeRegistrationRepository:
+    """In-memory stand-in for app/repository.py, using the agreed signatures.
+
+    Unlike a Mock, it remembers writes, so tests can book, cancel and rebook
+    and then check what a later request sees. No MySQL is involved.
+    """
+
+    def __init__(self):
+        """Seed three participants and no events; return None."""
+        self.events = {}
+        self.participants = {
+            1: {"id": 1, "name": "Maya Okafor", "email": "maya@example.com"},
+            2: {"id": 2, "name": "Alex Chen", "email": "alex@example.com"},
+            3: {"id": 3, "name": "Sam Rivera", "email": "sam@example.com"},
+        }
+        self.registrations = {}
+        self.next_registration_id = 1
+
+    def add_event(self, event_id, capacity=2, start_time=FUTURE_START):
+        """Store an event with the given id, capacity and start_time; return None."""
+        self.events[event_id] = {
+            "id": event_id,
+            "title": f"Event {event_id}",
+            "location": "Room 101",
+            "startTime": start_time,
+            "capacity": capacity,
+        }
+
+    def get_event(self, event_id):
+        """Return the event dict for event_id, or None."""
+        return self.events.get(event_id)
+
+    def get_participant(self, participant_id):
+        """Return the participant dict for participant_id, or None."""
+        return self.participants.get(participant_id)
+
+    def find_registration(self, event_id, participant_id):
+        """Return the event_id/participant_id registration, or None."""
+        for registration in self.registrations.values():
+            if (registration["eventId"], registration["participantId"]) == (
+                event_id,
+                participant_id,
+            ):
+                return registration
+        return None
+
+    def count_registrations(self, event_id):
+        """Return how many registrations event_id currently has."""
+        return len(self._rows_for(event_id))
+
+    def create_registration(self, event_id, participant_id):
+        """Insert a registration for event_id/participant_id and return it."""
+        registration = {
+            "id": self.next_registration_id,
+            "eventId": event_id,
+            "participantId": participant_id,
+            "participantName": self.participants[participant_id]["name"],
+            "registeredAt": "2026-11-01T12:00:00Z",
+        }
+        self.registrations[registration["id"]] = registration
+        self.next_registration_id += 1
+        return dict(registration)
+
+    def delete_registration(self, event_id, registration_id):
+        """Delete registration_id only if it belongs to event_id; return bool."""
+        registration = self.registrations.get(registration_id)
+        if registration is None or registration["eventId"] != event_id:
+            return False
+        del self.registrations[registration_id]
+        return True
+
+    def list_registrations_with_names(self, event_id):
+        """Return copies of event_id's registrations, including names."""
+        return [dict(row) for row in self._rows_for(event_id)]
+
+    def _rows_for(self, event_id):
+        """Return the stored registration rows for event_id."""
+        return [
+            row for row in self.registrations.values() if row["eventId"] == event_id
+        ]
+
+
+def build_client(repository, clock=lambda: FIXED_NOW):
+    """Create a test client around repository with a controllable clock.
+
+    Args:
+        repository: Mock or fake repository injected into the blueprint.
+        clock: Zero-argument function returning the "current" UTC datetime.
+
+    Returns:
+        FlaskClient: In-process client; does not start an HTTP server.
+    """
+    test_app = Flask(__name__)
+    test_app.config.update(TESTING=True)
+    register_error_handlers(test_app)
+    test_app.register_blueprint(create_registration_blueprint(repository, clock))
+    return test_app.test_client()
+
+
+@pytest.fixture
+def fake_repository():
+    """Return a fake repository with event 4 (capacity 2, starts in the future)."""
+    repository = FakeRegistrationRepository()
+    repository.add_event(4)
+    return repository
+
+
+@pytest.fixture
+def fake_client(fake_repository):
+    """Return a test client wired to fake_repository and FIXED_NOW."""
+    return build_client(fake_repository)
+
+
+def book(client, event_id, participant_id):
+    """POST a booking for participant_id to event_id; return the response."""
+    return client.post(
+        f"/api/v1/events/{event_id}/registrations",
+        json={"participantId": participant_id},
+    )
 
 
 @pytest.fixture
@@ -47,11 +174,7 @@ def client(repository):
     Returns:
         FlaskClient: In-process client; does not start an HTTP server.
     """
-    test_app = Flask(__name__)
-    test_app.config.update(TESTING=True)
-    register_error_handlers(test_app)
-    test_app.register_blueprint(create_registration_blueprint(repository))
-    return test_app.test_client()
+    return build_client(repository)
 
 
 def test_list_registrations_includes_participant_names(client, repository):
@@ -264,3 +387,220 @@ def test_event_start_rejects_datetimes_without_timezone(naive_start, naive_curre
 
     with pytest.raises(ValueError, match="timezone-aware"):
         has_event_started(event_start_time=event_start_time, current_time=current_time)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-12-01T18:00:00Z",
+        "2026-12-01T18:00:00+00:00",
+        "2026-12-01T11:00:00-07:00",
+        datetime(2026, 12, 1, 18, 0),
+        datetime(2026, 12, 1, 18, 0, tzinfo=timezone.utc),
+        datetime(2026, 12, 1, 23, 30, tzinfo=timezone(timedelta(hours=5.5))),
+    ],
+)
+def test_to_utc_datetime_accepts_repository_time_formats(value):
+    """Convert each supplied string/datetime form of one instant to UTC; return None."""
+    converted = to_utc_datetime(value)
+
+    assert converted == datetime(2026, 12, 1, 18, 0, tzinfo=timezone.utc)
+    assert converted.utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize(
+    "value, expected_error",
+    [
+        ("2026-12-01T18:00:00", ValueError),
+        ("not a date", ValueError),
+        ("", ValueError),
+        (1764612000, TypeError),
+        (None, TypeError),
+    ],
+)
+def test_to_utc_datetime_rejects_ambiguous_or_invalid_values(value, expected_error):
+    """Check that a supplied invalid value raises expected_error; return None."""
+    with pytest.raises(expected_error):
+        to_utc_datetime(value)
+
+
+def test_register_creates_registration(fake_client, fake_repository):
+    """Book a free place and check the 201 body and stored row; return None."""
+    response = book(fake_client, 4, 1)
+
+    assert response.status_code == 201
+    assert response.get_json() == {
+        "id": 1,
+        "eventId": 4,
+        "participantId": 1,
+        "participantName": "Maya Okafor",
+        "registeredAt": "2026-11-01T12:00:00Z",
+    }
+    assert fake_repository.count_registrations(4) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"participantId": None},
+        {"participantId": "1"},
+        {"participantId": 1.5},
+        {"participantId": 1.0},
+        {"participantId": True},
+        {"participantId": 0},
+        {"participantId": -1},
+        {"participantId": 1, "registeredAt": "2026-01-01T00:00:00Z"},
+        [1],
+        "1",
+        1,
+        None,
+    ],
+)
+def test_register_rejects_invalid_body(fake_client, fake_repository, body):
+    """Send a supplied invalid JSON body; expect 400 and no new row; return None."""
+    # json.dumps so that None is sent as the literal `null`, not as "no body".
+    response = fake_client.post(
+        "/api/v1/events/4/registrations",
+        data=json.dumps(body),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["code"] == "BAD_REQUEST"
+    assert fake_repository.count_registrations(4) == 0
+
+
+def test_register_rejects_malformed_json(fake_client, fake_repository):
+    """Send broken JSON text; expect the shared 400 JSON error; return None."""
+    response = fake_client.post(
+        "/api/v1/events/4/registrations",
+        data='{"participantId": ',
+        content_type="application/json",
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["code"] == "BAD_REQUEST"
+    assert fake_repository.count_registrations(4) == 0
+
+
+def test_register_rejects_non_json_content_type(fake_client, fake_repository):
+    """Send form data instead of JSON; expect 415 JSON error; return None."""
+    response = fake_client.post(
+        "/api/v1/events/4/registrations", data={"participantId": "1"}
+    )
+
+    assert response.status_code == 415
+    assert response.get_json()["error"]["code"] == "UNSUPPORTED_MEDIA_TYPE"
+    assert fake_repository.count_registrations(4) == 0
+
+
+@pytest.mark.parametrize(
+    "event_id, participant_id, expected_code",
+    [
+        (99, 1, "EVENT_NOT_FOUND"),
+        (4, 99, "PARTICIPANT_NOT_FOUND"),
+        (99, 99, "EVENT_NOT_FOUND"),
+    ],
+)
+def test_register_rejects_missing_records(
+    fake_client, fake_repository, event_id, participant_id, expected_code
+):
+    """Book with a supplied missing event/participant; expect 404; return None."""
+    response = book(fake_client, event_id, participant_id)
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == expected_code
+    assert fake_repository.registrations == {}
+
+
+@pytest.mark.parametrize("event_id", ["0", "-1", "abc"])
+def test_register_rejects_invalid_event_path(fake_client, event_id):
+    """POST to a supplied invalid event path ID; expect 404 JSON; return None."""
+    response = fake_client.post(
+        f"/api/v1/events/{event_id}/registrations", json={"participantId": 1}
+    )
+
+    assert response.status_code == 404
+    assert "error" in response.get_json()
+
+
+def test_register_rejects_duplicate(fake_client, fake_repository):
+    """Book the same participant twice; expect 409 and one row; return None."""
+    book(fake_client, 4, 1)
+
+    response = book(fake_client, 4, 1)
+
+    assert response.status_code == 409
+    assert response.get_json()["error"]["code"] == "DUPLICATE_REGISTRATION"
+    assert fake_repository.count_registrations(4) == 1
+
+
+def test_register_rejects_full_event(fake_client, fake_repository):
+    """Fill a capacity-2 event, then book a third; expect 409; return None."""
+    book(fake_client, 4, 1)
+    book(fake_client, 4, 2)
+
+    response = book(fake_client, 4, 3)
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "error": {
+            "code": "EVENT_FULL",
+            "message": "Event 4 has no spots left.",
+            "details": {"eventId": 4, "capacity": 2},
+        }
+    }
+    assert fake_repository.count_registrations(4) == 2
+
+
+@pytest.mark.parametrize(
+    "now_offset, expected_status",
+    [
+        (timedelta(seconds=-1), 201),
+        (timedelta(0), 409),
+        (timedelta(seconds=1), 409),
+    ],
+)
+def test_register_checks_start_time_boundary(
+    fake_repository, now_offset, expected_status
+):
+    """Book at a supplied offset from start; check open/closed status; return None."""
+    start = datetime(2026, 12, 1, 18, 0, tzinfo=timezone.utc)
+    client = build_client(fake_repository, clock=lambda: start + now_offset)
+
+    response = book(client, 4, 1)
+
+    assert response.status_code == expected_status
+    if expected_status == 409:
+        assert response.get_json()["error"]["code"] == "EVENT_STARTED"
+
+
+def test_register_accepts_naive_mysql_start_time(fake_repository):
+    """Store a naive datetime start (as MySQL returns it); booking works; return None."""
+    fake_repository.add_event(5, start_time=datetime(2026, 12, 1, 18, 0))
+    client = build_client(fake_repository)
+
+    assert book(client, 5, 1).status_code == 201
+
+
+@pytest.mark.parametrize(
+    "setup, expected_code",
+    [
+        ("duplicate_and_full", "DUPLICATE_REGISTRATION"),
+        ("started_and_full", "EVENT_STARTED"),
+    ],
+)
+def test_register_reports_rules_in_agreed_order(fake_repository, setup, expected_code):
+    """Break two rules at once per setup; expect the earlier rule's code; return None."""
+    fake_repository.add_event(6, capacity=1)
+    book(build_client(fake_repository), 6, 1)
+    clock = lambda: FIXED_NOW  # noqa: E731
+    if setup == "started_and_full":
+        clock = lambda: datetime(2027, 1, 1, tzinfo=timezone.utc)  # noqa: E731
+    participant_id = 1 if setup == "duplicate_and_full" else 2
+
+    response = book(build_client(fake_repository, clock), 6, participant_id)
+
+    assert response.status_code == 409
+    assert response.get_json()["error"]["code"] == expected_code
