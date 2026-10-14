@@ -1,7 +1,8 @@
 """Unit tests for the registration routes, using an in-memory fake repository.
 
 No MySQL or network is needed. The clock is fixed so start-time rules
-never depend on the real date.
+never depend on the real date. The fake returns snake_case rows with
+datetimes, as docs/api-contract.md says the real repository will.
 
 Author: Joseph (JD-d3v)
 Date: 2026-10-14
@@ -32,9 +33,9 @@ class FakeRepository:
         self.rows = {}
         self.next_id = 1
 
-    def add_event(self, event_id, capacity=2, start_time="2026-12-01T18:00:00Z"):
-        """Store event event_id with the given capacity and start_time."""
-        self.events[event_id] = {"startTime": start_time, "capacity": capacity}
+    def add_event(self, event_id, capacity=2, start_time=datetime(2026, 12, 1, 18, 0)):
+        """Store event event_id with capacity and a (naive UTC) start_time."""
+        self.events[event_id] = {"start_time": start_time, "capacity": capacity}
 
     def get_event(self, event_id):
         """Return event event_id, or None."""
@@ -48,7 +49,7 @@ class FakeRepository:
     def find_registration(self, event_id, participant_id):
         """Return event_id's registration for participant_id, or None."""
         matches = [
-            r for r in self.for_event(event_id) if r["participantId"] == participant_id
+            r for r in self.for_event(event_id) if r["participant_id"] == participant_id
         ]
         return matches[0] if matches else None
 
@@ -57,33 +58,34 @@ class FakeRepository:
         return len(self.for_event(event_id))
 
     def create_registration(self, event_id, participant_id):
-        """Insert and return a registration for event_id and participant_id."""
-        row = {
+        """Insert a registration for event_id/participant_id; return the row without a name."""
+        self.rows[self.next_id] = {
             "id": self.next_id,
-            "eventId": event_id,
-            "participantId": participant_id,
-            "participantName": self.names[participant_id],
-            "registeredAt": "2026-11-01T12:00:00Z",
+            "event_id": event_id,
+            "participant_id": participant_id,
+            "registered_at": datetime(2026, 11, 1, 12, 0),
         }
-        self.rows[self.next_id] = row
         self.next_id += 1
-        return row
+        return dict(self.rows[self.next_id - 1])
 
     def delete_registration(self, event_id, registration_id):
         """Delete registration_id if it belongs to event_id; return whether it did."""
         row = self.rows.get(registration_id)
-        if row is None or row["eventId"] != event_id:
+        if row is None or row["event_id"] != event_id:
             return False
         del self.rows[registration_id]
         return True
 
     def list_registrations_with_names(self, event_id):
-        """Return event_id's registrations, including participant names."""
-        return self.for_event(event_id)
+        """Return event_id's registrations joined with participant names."""
+        return [
+            {**row, "participant_name": self.names[row["participant_id"]]}
+            for row in self.for_event(event_id)
+        ]
 
     def for_event(self, event_id):
         """Return the stored rows belonging to event_id."""
-        return [r for r in self.rows.values() if r["eventId"] == event_id]
+        return [r for r in self.rows.values() if r["event_id"] == event_id]
 
 
 def build_client(repository, now=FIXED_NOW):
@@ -190,61 +192,73 @@ def test_repository_failure_returns_generic_500(client, repo, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "method, path",
+    "method, path, expected_code",
     [
-        ("get", "/api/v1/events/abc/registrations"),
-        ("get", "/api/v1/events/-1/registrations"),
-        ("post", "/api/v1/events/1.5/registrations"),
-        ("delete", "/api/v1/events/4/registrations/abc"),
-        ("delete", "/api/v1/events/4/registrations/-1"),
+        ("get", "/api/v1/events/abc/registrations", "EVENT_NOT_FOUND"),
+        ("get", "/api/v1/events/0/registrations", "EVENT_NOT_FOUND"),
+        ("get", "/api/v1/events/-1/registrations", "EVENT_NOT_FOUND"),
+        ("post", "/api/v1/events/1.5/registrations", "EVENT_NOT_FOUND"),
+        ("delete", "/api/v1/events/abc/registrations/1", "EVENT_NOT_FOUND"),
+        ("delete", "/api/v1/events/4/registrations/abc", "REGISTRATION_NOT_FOUND"),
+        ("delete", "/api/v1/events/4/registrations/0", "REGISTRATION_NOT_FOUND"),
     ],
 )
-def test_non_integer_path_ids_return_json_404(client, method, path):
-    """Call a supplied method/path with a bad ID; expect a JSON 404; return None."""
+def test_invalid_path_ids_return_specific_404(client, method, path, expected_code):
+    """Call a supplied method/path with a bad ID; expect expected_code; return None."""
     response = getattr(client, method)(path, json={"participantId": 1})
 
     assert response.status_code == 404
-    assert "error" in response.get_json()
+    assert error_code(response) == expected_code
 
 
 # ---- Booking ----
 
 
-def test_book_creates_registration(client, repo):
-    """Book a free place; expect 201 with the new row; return None."""
+def test_book_creates_registration_with_location(client, repo):
+    """Book a free place; expect 201, the row and a Location header; return None."""
     response = book(client, 4, 1)
 
     assert response.status_code == 201
-    assert response.get_json()["participantName"] == "Maya Okafor"
+    assert response.get_json() == {
+        "id": 1,
+        "eventId": 4,
+        "participantId": 1,
+        "participantName": "Maya Okafor",
+        "registeredAt": "2026-11-01T12:00:00Z",
+    }
+    assert response.headers["Location"] == "/api/v1/events/4/registrations/1"
     assert repo.count_registrations(4) == 1
 
 
-NOT_AN_OBJECT = None
-BAD_ID = {"fields": ["participantId"]}
+BODY_ERROR = [{"field": "body", "reason": "must be a JSON object"}]
+ID_ERROR = [{"field": "participantId", "reason": "must be a positive integer"}]
 
 
 @pytest.mark.parametrize(
-    "body, expected_details",
+    "body, expected_errors",
     [
-        ({}, BAD_ID),
-        ({"participantId": None}, BAD_ID),
-        ({"participantId": "1"}, BAD_ID),
-        ({"participantId": 1.0}, BAD_ID),
-        ({"participantId": True}, BAD_ID),
-        ({"participantId": 0}, BAD_ID),
-        ({"participantId": -1}, BAD_ID),
-        ({"participantID": 1}, {"fields": ["participantID"]}),
+        ({}, ID_ERROR),
+        ({"participantId": None}, ID_ERROR),
+        ({"participantId": "1"}, ID_ERROR),
+        ({"participantId": 1.0}, ID_ERROR),
+        ({"participantId": True}, ID_ERROR),
+        ({"participantId": 0}, ID_ERROR),
+        ({"participantId": -1}, ID_ERROR),
         (
-            {"participantId": 1, "registeredAt": "x", "a": 1},
-            {"fields": ["a", "registeredAt"]},
+            {"participantID": 1},
+            [{"field": "participantID", "reason": "unknown field"}, *ID_ERROR],
         ),
-        ([1], NOT_AN_OBJECT),
-        (1, NOT_AN_OBJECT),
-        (None, NOT_AN_OBJECT),
+        (
+            {"participantId": 1, "registeredAt": "x"},
+            [{"field": "registeredAt", "reason": "unknown field"}],
+        ),
+        ([1], BODY_ERROR),
+        (1, BODY_ERROR),
+        (None, BODY_ERROR),
     ],
 )
-def test_book_rejects_invalid_body(client, repo, body, expected_details):
-    """Send a supplied invalid body; expect 400 naming expected_details; return None."""
+def test_book_rejects_invalid_body(client, repo, body, expected_errors):
+    """Send a supplied invalid body; expect 400 listing expected_errors; return None."""
     # json.dumps so that None is sent as the JSON literal null, not "no body".
     response = client.post(
         "/api/v1/events/4/registrations",
@@ -253,28 +267,27 @@ def test_book_rejects_invalid_body(client, repo, body, expected_details):
     )
 
     assert response.status_code == 400
-    assert error_code(response) == "BAD_REQUEST"
-    assert response.get_json()["error"].get("details") == expected_details
+    assert error_code(response) == "VALIDATION_ERROR"
+    assert response.get_json()["error"]["details"] == {"errors": expected_errors}
     assert repo.count_registrations(4) == 0
 
 
 @pytest.mark.parametrize(
-    "data, content_type, expected_status",
+    "data, content_type",
     [
-        ('{"participantId": ', "application/json", 400),
-        ("participantId=1", "application/x-www-form-urlencoded", 415),
+        ('{"participantId": ', "application/json"),
+        ("participantId=1", "application/x-www-form-urlencoded"),
+        ("", None),
     ],
 )
-def test_book_rejects_malformed_or_non_json(
-    client, repo, data, content_type, expected_status
-):
-    """Send broken JSON or form data; expect a JSON 400/415 error; return None."""
+def test_book_rejects_malformed_or_non_json(client, repo, data, content_type):
+    """Send broken JSON, form data or nothing; expect 400 VALIDATION_ERROR; return None."""
     response = client.post(
         "/api/v1/events/4/registrations", data=data, content_type=content_type
     )
 
-    assert response.status_code == expected_status
-    assert "error" in response.get_json()
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"] == {"errors": BODY_ERROR}
     assert repo.count_registrations(4) == 0
 
 
@@ -341,16 +354,10 @@ def test_book_closes_at_start_time(repo, offset, expected_status):
         assert error_code(response) == "EVENT_STARTED"
 
 
-@pytest.mark.parametrize(
-    "start_time",
-    [
-        "2026-12-01T11:00:00-07:00",
-        datetime(2026, 12, 1, 18, 0),
-    ],
-)
-def test_book_reads_offset_and_mysql_start_times(repo, start_time):
-    """Store a supplied start form (offset string / naive MySQL value); return None."""
-    repo.add_event(5, start_time=start_time)
+def test_book_reads_timezone_aware_start_time(repo):
+    """Store the start as an aware -07:00 datetime; same UTC boundary; return None."""
+    start = datetime(2026, 12, 1, 11, 0, tzinfo=timezone(timedelta(hours=-7)))
+    repo.add_event(5, start_time=start)
 
     before = book(build_client(repo, now=EVENT_START - timedelta(seconds=1)), 5, 1)
     at_start = book(build_client(repo, now=EVENT_START), 5, 2)
@@ -359,12 +366,16 @@ def test_book_reads_offset_and_mysql_start_times(repo, start_time):
     assert error_code(at_start) == "EVENT_STARTED"
 
 
-def test_book_reports_earlier_rule_when_two_fail(repo):
-    """Break duplicate+full, then started+full; expect the earlier rule; return None."""
+def test_book_follows_contract_check_order(repo):
+    """Break two rules at once; expect 400 > 404 > duplicate > started; return None."""
     repo.add_event(6, capacity=1)
     book(build_client(repo), 6, 1)
     after_start = build_client(repo, now=EVENT_START + timedelta(days=1))
+    bad_body_missing_event = build_client(repo).post(
+        "/api/v1/events/99/registrations", json={"participantId": "x"}
+    )
 
+    assert error_code(bad_body_missing_event) == "VALIDATION_ERROR"
     assert error_code(book(build_client(repo), 6, 1)) == "DUPLICATE_REGISTRATION"
     assert error_code(book(after_start, 6, 2)) == "EVENT_STARTED"
 

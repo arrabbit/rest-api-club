@@ -3,9 +3,8 @@
 Owner: Joseph (GitHub: JD-d3v; branch: JD)
 Drafted: October 14, 2026
 
-Status: proposed contract based on Assignment 1 and the team plan. This is
-Joseph's contribution for Jordan to incorporate into the shared API contract,
-not evidence that the team has approved every detail below.
+Status: code and tests now follow Jordan's docs/api-contract.md (error codes,
+check order, Location header, snake_case repository rows).
 
 ## Scope and progress
 
@@ -22,35 +21,25 @@ not evidence that the team has approved every detail below.
 - [ ] Run booking integration tests against the separate MySQL test database.
       Blocked: Darren's schema, seed, and integration fixture.
 - [ ] Run the demo script against the deployed API. Blocked: Anna's VM + seed data.
-- [ ] Decide the POST `Location` header with Jordan (open question below).
+- [x] Match docs/api-contract.md: VALIDATION_ERROR, specific 404s, Location header.
+- [ ] Paste the registration section below into docs/api-contract.md.
 - [ ] Perform the fresh-clone README walkthrough (Oct 17). Blocked: everyone.
 
 Events, participant management, SQL implementation, and deployment configuration
 remain with their respective owners. Concurrency control is outside assignment
 scope; demonstrate sequential requests.
 
-## Endpoint contract
+## Registration routes in detail (copy into docs/api-contract.md)
 
-All paths begin with `/api/v1`. IDs identify individual resources. JSON uses
-camelCase; Python variable and function names use snake_case. Timestamps use
-ISO 8601 UTC with trailing `Z`.
+### Registration
 
-| Operation | Method and path | Request | Success | Errors |
-| --- | --- | --- | --- | --- |
-| Register | POST `/api/v1/events/{eventId}/registrations` | JSON object containing `participantId` | 201 with registration object | 400 invalid JSON/input; 415 unsupported media type; 404 missing event/participant; 409 duplicate, full, or started event |
-| List | GET `/api/v1/events/{eventId}/registrations` | Event ID in path; no body | 200 with `{"data": [...]}` | 404 missing event |
-| Cancel | DELETE `/api/v1/events/{eventId}/registrations/{registrationId}` | Both IDs in path; no body | 204 with no body | 404 missing event or registration, including registration belonging to another event |
-
-An existing event with zero registrations returns 200 and `{"data": []}`.
-Unexpected failures use the existing generic 500 JSON error handler.
-
-Booking request:
-
-```json
-{"participantId": 3}
-```
-
-Registration representation (also used within the list's `data` array):
+| Field | Type | Notes |
+| --- | --- | --- |
+| `id` | integer | Server-assigned |
+| `eventId` | integer | From the path |
+| `participantId` | integer | From the request body |
+| `participantName` | string | Joined from participants |
+| `registeredAt` | string | ISO 8601 UTC with `Z`, set by the server |
 
 ```json
 {
@@ -62,87 +51,72 @@ Registration representation (also used within the list's `data` array):
 }
 ```
 
-Missing-event response currently implemented for listing:
+### POST /api/v1/events/{eventId}/registrations: register a participant
 
+- **Request body:** exactly `{"participantId": <positive integer>}`. Any other field is a 400. JSON `true`, `"3"`, `1.0` and `null` are rejected.
+- **Success:** `201`, body is the registration, header `Location: /api/v1/events/{eventId}/registrations/{id}` (the URL used to cancel it).
+- **Check order:** body (400), event (404), participant (404), duplicate (409), started (409), full (409).
+- **Rules:**
+  - Registration closes exactly at `startTime` (now >= startTime gives 409).
+  - Full means `count_registrations(eventId) >= capacity`.
+- **Errors:** `400 VALIDATION_ERROR`, `404 EVENT_NOT_FOUND`, `404 PARTICIPANT_NOT_FOUND`, `409 DUPLICATE_REGISTRATION`, `409 EVENT_STARTED`, `409 EVENT_FULL`.
+
+Request: `{"participantId": 3}`. Response `201`: the registration sample above.
+
+Error example, `409`:
 ```json
-{
-  "error": {
-    "code": "EVENT_NOT_FOUND",
-    "message": "Event 99 does not exist.",
-    "details": {"eventId": 99}
-  }
-}
+{ "error": { "code": "EVENT_FULL", "message": "Event 4 has no spots left.",
+  "details": { "eventId": 4, "capacity": 2 } } }
 ```
 
-## Rules and proposed decisions
+Error example, `400`:
+```json
+{ "error": { "code": "VALIDATION_ERROR", "message": "Request body is invalid.",
+  "details": { "errors": [
+    { "field": "participantID", "reason": "unknown field" },
+    { "field": "participantId", "reason": "must be a positive integer" } ] } } }
+```
 
-- Require a positive integer participant ID; reject booleans, floats, strings,
-  null, missing IDs, non-object bodies, and unknown fields.
-- The event and participant must exist before a registration can be created.
-- Reject an existing event/participant booking, a full event, and a started event.
-- Proposed boundary: reject when current UTC time is greater than or equal to
-  the event start time. Confirm the exact-start interpretation with Jordan.
-- Proposed precedence when several conditions fail: validate input, check event,
-  check participant, check duplicate, check start time, check capacity.
-- The server sets the registration timestamp; clients cannot supply it.
-- Cancellation deletes the row. Available places are capacity minus registration
-  count, never an independently incremented/decremented stored counter.
-- A repeated cancellation returns 404. Rebooking is allowed if open and not full.
-- Allow cancellation after start, as proposed in the team plan.
-- List order is unspecified in this draft; clients/tests must not rely on it.
-- Invalid or nonpositive path IDs receive 404; GET rejects zero explicitly.
+Flow: `get_json(silent=True)`, validate body, parse event ID, `get_event`, `get_participant`, `find_registration`, compare now with `start_time`, `count_registrations`, `create_registration`, return 201.
 
-Proposed booking error codes for confirmation: `BAD_REQUEST`, `EVENT_NOT_FOUND`,
-`PARTICIPANT_NOT_FOUND`, `DUPLICATE_REGISTRATION`, `EVENT_FULL`, `EVENT_STARTED`,
-and `REGISTRATION_NOT_FOUND`. Reuse `ApiError` and the existing shared handlers.
-Do not introduce a separate error response format.
+### GET /api/v1/events/{eventId}/registrations: list registrations
 
-Confirm with Jordan how to provide the proposed POST `Location` header: the team
-plan asks for one, but the assignment does not require a single-registration GET
-endpoint. Do not add a ninth operation to resolve this without discussion.
+- **Success:** `200 {"data": [registration, ...]}` including `participantName`. An event with no registrations returns `{"data": []}`.
+- **Errors:** `404 EVENT_NOT_FOUND`.
 
-## Repository interface to confirm with Darren
+Flow: parse event ID, `get_event` (404), `list_registrations_with_names` (SQL JOIN on participants), serialize each.
 
-| Function | Expected result |
+### DELETE /api/v1/events/{eventId}/registrations/{registrationId}: cancel
+
+- **Success:** `204`, empty body. The row is deleted, which frees one place.
+- **Rules:**
+  - Places are always `capacity - COUNT(registrations)`, never a stored counter. A second cancel finds no row and returns 404, so it cannot free a place twice.
+  - The registration must belong to the event in the path.
+  - Cancelling after the event starts is allowed.
+- **Errors:** `404 EVENT_NOT_FOUND`, `404 REGISTRATION_NOT_FOUND` (missing, already cancelled, or belongs to another event).
+
+Flow: parse event ID, `get_event` (404), parse registration ID, `delete_registration(event_id, registration_id)` returns False (404), return 204.
+
+### Repository rows used by the registration routes (for Darren)
+
+| Function | Returns |
 | --- | --- |
-| `get_event(event_id)` | Event dictionary, or `None` if absent |
-| `get_participant(participant_id)` | Participant dictionary, or `None` |
-| `find_registration(event_id, participant_id)` | Registration dictionary, or `None` |
-| `count_registrations(event_id)` | Integer count for that event |
-| `create_registration(event_id, participant_id)` | Newly created registration dictionary |
-| `delete_registration(event_id, registration_id)` | True if a matching row was deleted, otherwise False |
-| `list_registrations_with_names(event_id)` | List of registration dictionaries including participant names |
+| `get_event(event_id)` | row with `start_time` (naive-UTC or aware `datetime`) and `capacity`, or `None` |
+| `get_participant(participant_id)` | row with `name`, or `None` |
+| `find_registration(event_id, participant_id)` | row or `None` |
+| `count_registrations(event_id)` | int |
+| `create_registration(event_id, participant_id)` | row with `id`, `event_id`, `participant_id`, `registered_at` |
+| `delete_registration(event_id, registration_id)` | `True` if a row matching both IDs was deleted |
+| `list_registrations_with_names(event_id)` | rows as above plus `participant_name` |
 
-For the listing milestone, the repository returns JSON-ready camelCase records
-with UTC string timestamps, consistent with the team plan's repository translation
-rule. It filters by event ID and joins participant names. Confirm datetime and
-field representations before implementing booking's time comparisons.
-
-`create_registration_blueprint(repository)` accepts a module or object exposing
-the repository functions. This lets isolated tests supply controlled responses
-without importing an unfinished database module or contacting MySQL.
-
-Once the real repository exists, Precious can wire it in `create_app()`:
-
-```python
-from app import repository
-from app.routes.registrations import create_registration_blueprint
-
-app.register_blueprint(create_registration_blueprint(repository))
-```
-
-The current production application factory is unchanged. The new endpoint is
-registered only in the isolated tests until this handoff is complete. There is
-no in-memory production fallback.
+Registration unit tests: `tests/unit/test_registration_routes.py` (marker `unit`, fake repository).
 
 ## Test checklist
 
-All rules live in `app/routes/registrations.py`: `parse_participant_id`
-validates the body (swap for Precious's `validation.py` once it exists),
-`require_event` gives the standard 404, and `check_registration_allowed`
-applies the rules in order (event, participant, duplicate, started, full).
-Start times may be ISO strings with an offset or MySQL datetimes without one
-(treated as UTC, matching the connection's `time_zone="+00:00"`).
+All rules live in `app/routes/registrations.py`. `parse_participant_id`
+validates the body, `require_event` parses the path ID and gives the 404,
+`check_registration_allowed` applies the rules in contract order, and
+`registration_to_json` turns snake_case rows into camelCase with `Z` times.
 
 Unit tests in `tests/unit/test_registration_routes.py` call the real routes
 through Flask's test client. `FakeRepository` is an in-memory class with the
@@ -155,16 +129,16 @@ clock, so start-time tests never depend on the real date.
 | List empty event | 200, `{"data": []}` | `test_list_empty_event_returns_empty_data` |
 | List missing event | 404 standard error | `test_list_missing_event_returns_404` |
 | Repository failure | Generic 500, no internal details | `test_repository_failure_returns_generic_500` |
-| Non-integer path IDs | JSON 404 | `test_non_integer_path_ids_return_json_404` |
-| Valid booking | 201, one more row | `test_book_creates_registration` |
-| Bad body (12 cases) | 400 naming the bad fields in `details.fields`, no row | `test_book_rejects_invalid_body` |
-| Malformed JSON / not JSON | 400 / 415 JSON error | `test_book_rejects_malformed_or_non_json` |
+| Bad path IDs (`abc`, `0`, `-1`, `1.5`) | 404 `EVENT_NOT_FOUND` / `REGISTRATION_NOT_FOUND` | `test_invalid_path_ids_return_specific_404` |
+| Valid booking | 201, row, `Location` header | `test_book_creates_registration_with_location` |
+| Bad body (12 cases) | 400 `VALIDATION_ERROR` listing each problem, no row | `test_book_rejects_invalid_body` |
+| Malformed JSON / not JSON / no body | 400 `VALIDATION_ERROR` (`field: body`) | `test_book_rejects_malformed_or_non_json` |
 | Missing event or participant | 404, no row | `test_book_missing_event_or_participant_returns_404` |
 | Duplicate booking | 409, count unchanged | `test_book_duplicate_returns_409` |
 | Full event | 409 `EVENT_FULL` | `test_book_full_event_returns_409` |
 | 1 s before / at / after start | 201 / 409 / 409 | `test_book_closes_at_start_time` |
-| Offset string and MySQL start times | Same boundary | `test_book_reads_offset_and_mysql_start_times` |
-| Two rules broken at once | Earlier rule's code | `test_book_reports_earlier_rule_when_two_fail` |
+| Aware (non-UTC) start time | Same boundary | `test_book_reads_timezone_aware_start_time` |
+| Several rules broken at once | Contract order: 400, 404, 409 | `test_book_follows_contract_check_order` |
 | Cancel | 204, row removed | `test_cancel_deletes_registration` |
 | Repeated cancel | 404, no extra place | `test_cancel_twice_does_not_free_extra_place` |
 | Other event's registration | 404, row kept | `test_cancel_registration_of_other_event_returns_404` |
@@ -226,11 +200,11 @@ Tests: `test_cancel_twice_does_not_free_extra_place`,
 
 | Date | Found by | Defect | Fix |
 | --- | --- | --- | --- |
-| 2026-10-14 | `test_book_rejects_invalid_body[None]` | The test meant to send the JSON literal `null`, but Flask's test client treats `json=None` as "no body", so the request had no content type and correctly got 415 instead of the 400 being tested. The `null` case was silently untested. | Encode the body with `json.dumps` and set `application/json` explicitly. This is a defect in a test, not in the route. |
+| 2026-10-14 | `test_book_rejects_invalid_body[None]` | The test meant to send the JSON literal `null`, but Flask's test client treats `json=None` as "no body", so the request had no content type and got 415 instead of the 400 being tested (before the contract moved body errors to 400). The `null` case was silently untested. | Encode the body with `json.dumps` and set `application/json` explicitly. This is a defect in a test, not in the route. |
 
 ## Local verification results (2026-10-14)
 
-- `python -m pytest tests/unit -q`: 48 passed.
+- `python -m pytest tests/unit -q`: 50 passed.
 - Branch coverage of `app/routes/registrations.py`: 100%.
 - `scripts/demo_deployed.sh` against a local server using the fake repository:
   all 5 steps returned the expected status; a second run also passed, and a
