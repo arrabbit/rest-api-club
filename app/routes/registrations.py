@@ -307,4 +307,36 @@ def create_registration_blueprint(repository, clock=utc_now):
         registration = repository.create_registration(event_id, participant_id)
         return jsonify(registration), 201
 
+    @registrations_blueprint.delete(
+        "/events/<int:event_id>/registrations/<int:registration_id>"
+    )
+    def cancel_registration(event_id: int, registration_id: int):
+        """Cancel a registration by deleting its row, which frees one place.
+
+        Args:
+            event_id: Event identifier supplied in the request path.
+            registration_id: Registration identifier supplied in the request path.
+
+        Returns:
+            tuple: Empty body and HTTP status 204.
+
+        Raises:
+            ApiError: 404 if the event is missing, or the registration is
+                missing, already cancelled, or belongs to another event.
+        """
+        require_event(repository, event_id)
+        # Deleting (not decrementing a counter) means a repeated cancel finds
+        # no row and cannot release extra capacity. Cancel after start is allowed.
+        deleted = registration_id >= 1 and repository.delete_registration(
+            event_id, registration_id
+        )
+        if not deleted:
+            raise ApiError(
+                404,
+                "REGISTRATION_NOT_FOUND",
+                f"Registration {registration_id} does not exist for event {event_id}.",
+                {"eventId": event_id, "registrationId": registration_id},
+            )
+        return "", 204
+
     return registrations_blueprint

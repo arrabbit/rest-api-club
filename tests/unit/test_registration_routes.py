@@ -604,3 +604,74 @@ def test_register_reports_rules_in_agreed_order(fake_repository, setup, expected
 
     assert response.status_code == 409
     assert response.get_json()["error"]["code"] == expected_code
+
+
+def cancel(client, event_id, registration_id):
+    """DELETE registration_id under event_id; return the response."""
+    return client.delete(f"/api/v1/events/{event_id}/registrations/{registration_id}")
+
+
+def test_cancel_removes_registration(fake_client, fake_repository):
+    """Cancel an existing booking; expect 204, empty body, row gone; return None."""
+    registration_id = book(fake_client, 4, 1).get_json()["id"]
+
+    response = cancel(fake_client, 4, registration_id)
+
+    assert response.status_code == 204
+    assert response.get_data() == b""
+    assert fake_repository.count_registrations(4) == 0
+
+
+def test_cancel_twice_does_not_release_extra_place(fake_client, fake_repository):
+    """Cancel the same booking twice; second gets 404, count unchanged; return None."""
+    first_id = book(fake_client, 4, 1).get_json()["id"]
+    book(fake_client, 4, 2)
+    cancel(fake_client, 4, first_id)
+
+    response = cancel(fake_client, 4, first_id)
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "REGISTRATION_NOT_FOUND"
+    assert fake_repository.count_registrations(4) == 1
+
+
+def test_cancel_rejects_registration_from_other_event(fake_client, fake_repository):
+    """Cancel event 5's booking via event 4; expect 404, row kept; return None."""
+    fake_repository.add_event(5)
+    other_id = book(fake_client, 5, 1).get_json()["id"]
+
+    response = cancel(fake_client, 4, other_id)
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "REGISTRATION_NOT_FOUND"
+    assert fake_repository.count_registrations(5) == 1
+
+
+def test_cancel_rejects_missing_event(fake_client, fake_repository):
+    """Cancel under a missing event; expect 404 EVENT_NOT_FOUND; return None."""
+    registration_id = book(fake_client, 4, 1).get_json()["id"]
+
+    response = cancel(fake_client, 99, registration_id)
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "EVENT_NOT_FOUND"
+    assert fake_repository.count_registrations(4) == 1
+
+
+@pytest.mark.parametrize("registration_id", ["0", "-1", "abc", "999"])
+def test_cancel_rejects_invalid_or_unknown_registration(fake_client, registration_id):
+    """Cancel a supplied invalid/unknown registration ID; expect 404; return None."""
+    response = fake_client.delete(f"/api/v1/events/4/registrations/{registration_id}")
+
+    assert response.status_code == 404
+    assert "error" in response.get_json()
+
+
+def test_cancel_allowed_after_event_starts(fake_repository):
+    """Book before start, cancel after start; expect 204 (team assumption)."""
+    registration_id = book(build_client(fake_repository), 4, 1).get_json()["id"]
+    after_start = build_client(
+        fake_repository, clock=lambda: datetime(2027, 1, 1, tzinfo=timezone.utc)
+    )
+
+    assert cancel(after_start, 4, registration_id).status_code == 204
