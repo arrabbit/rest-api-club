@@ -220,3 +220,4 @@ __marimo__/
 # Campus Events project
 *.env
 mysql-data/
+scratch_check.py

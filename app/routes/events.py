@@ -80,8 +80,31 @@ def read_json_body() -> dict:
     body = request.get_json(silent=True)
 
     if not isinstance(body, dict):
-        raise ApiError(400, "VALIDATION_ERROR", "Request body must be a JSON object")
+        raise ApiError(400, "VALIDATION_ERROR", "Request body must be a JSON object",
+                       {"errors": [{"field": "body", "reason": "request body is not a JSON object."}]})
     return body
+
+def check_time_order(row: dict, changes: dict) -> None:
+    """Raise a 400 if the merged startTime/endTime would not be in order."""
+
+    start = as_utc(changes.get("start_time", row["start_time"]))
+    end = as_utc(changes.get("end_time", row["end_time"]))
+
+    if end <= start:
+        raise ApiError(400, "VALIDATION_ERROR", f"Invalid start and end times. Start time: {start}, End time: {end}",
+                       {"errors": [{"field": "endTime",  "reason": "must be after startTime"}]})
+
+def check_capacity(event_id: int, changes: dict, repository) -> None:
+    """Raise a 409 if the new capacity is below the current registrations."""
+
+    new_cap = changes.get("capacity")
+    if new_cap is not None:
+        registered = repository.count_registrations(event_id)
+
+        if new_cap < registered:
+            raise ApiError(409, "CAPACITY_BELOW_REGISTRATIONS", f"Too many registrants. Club capacity: {new_cap}, Attempted registrants: {registered}",
+                           {"errors": [{"field": "capacity",  "reason": "num of registrants exceeds club capacity"}]})
+
 
 def create_event_blueprint(repository):
     """
@@ -96,7 +119,7 @@ def create_event_blueprint(repository):
     blueprint = Blueprint("events", __name__, url_prefix="/api/v1/events")
 
     @blueprint.get("")
-    def list_events():
+    def list_events(): # list_events() is referred to as a "flask view"
         """
         List all events.
 
@@ -148,6 +171,21 @@ def create_event_blueprint(repository):
         response.headers["Location"] = f"/api/v1/events/{row['id']}"
         return response
 
-    
+    @blueprint.patch("/<event_id>")
+    def update_event(event_id: str):
+        """PATCH /api/v1/events/<event_id> updates some fields of an event."""
+        parsed_id = parse_event_id(event_id)
+        body = read_json_body()
+        changes = validate_event_patch(body) # TEMP: Precious' function
+        row = repository.get_event(parsed_id)
+        if row is None:
+            raise ApiError(404, "EVENT_NOT_FOUND", f"Could not find event with id {parsed_id}")
+
+        check_time_order(row, changes)
+        check_capacity(parsed_id, changes, repository)
+
+        repository.update_event(parsed_id, changes)
+        event = repository.get_event(parsed_id)
+        return event_to_json(event)
 
     return blueprint
