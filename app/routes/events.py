@@ -7,9 +7,7 @@ Date created:         2026-10-14
 Date last editted:    2026-10-14
 """
 from datetime import datetime, timezone
-
 from flask import Blueprint, jsonify
-
 from app.errors import ApiError
 
 
