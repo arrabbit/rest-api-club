@@ -1,14 +1,3 @@
-"""
-repository.py
-Purpose: The only module that talks to MySQL. Routes call these functions
-         and get back plain dicts with snake_case keys; they never write
-         SQL themselves. Every query uses %s parameters. Datetimes come
-         back as naive datetimes that are already in UTC.
-Authors: Darren
-Date created:         2026-10-14
-Date last editted:    2026-10-14
-"""
-
 import mysql.connector
 
 from app.config import get_db_settings
@@ -158,7 +147,7 @@ def count_registrations(event_id):
     The number of registrations, 0 if there are none.
     """
     raise NotImplementedError
-
+    
 
 def find_registration(event_id, participant_id):
     """
