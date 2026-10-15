@@ -3,13 +3,10 @@ events.py
 Purpose: Event routes (create, list, get, update, delete) for the Campus
          Events API, plus helpers that shape event data for the contract.
 Authors: Jordan Senko
-Date created:         2026-10-14
-Date last editted:    2026-10-14
 """
 from datetime import datetime, timezone
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from app.errors import ApiError
-
 
 def as_utc(value: datetime) -> datetime:
     """
@@ -78,6 +75,14 @@ def parse_event_id(raw: str) -> int:
         raise ApiError(404, "EVENT_NOT_FOUND", f"No event with id {raw}.", {"eventId": raw})
     return event_id
 
+def read_json_body() -> dict:
+    """Return the request body as a dict, or raise a 400 ApiError."""
+    body = request.get_json(silent=True)
+
+    if not isinstance(body, dict):
+        raise ApiError(400, "VALIDATION_ERROR", "Request body must be a JSON object")
+    return body
+
 def create_event_blueprint(repository):
     """
     Build the event routes around a repository.
@@ -127,5 +132,22 @@ def create_event_blueprint(repository):
         if row is None:
             raise ApiError(404, "EVENT_NOT_FOUND", f"No event with id {parsed_id}.", {"eventId": parsed_id})
         return event_to_json(row)
+
+    @blueprint.post("")
+    def create_event():
+        """
+        POST /api/v1/events creates an event.
+        """
+        body = read_json_body()
+        fields = validate_event_create(body) # TEMP: returns a clean dict; Precious' function
+        row = repository.create_event(fields["title"], fields["country"], fields["province"], fields["city"], 
+                                fields["address"], fields["start_time"], fields["end_time"], fields["capacity"])
+        row["registered_count"] = 0
+        response = jsonify(event_to_json(row))
+        response.status_code = 201
+        response.headers["Location"] = f"/api/v1/events/{row['id']}"
+        return response
+
+    
 
     return blueprint
