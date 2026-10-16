@@ -3,13 +3,10 @@ events.py
 Purpose: Event routes (create, list, get, update, delete) for the Campus
          Events API, plus helpers that shape event data for the contract.
 Authors: Jordan Senko
-Date created:         2026-10-14
-Date last editted:    2026-10-14
 """
 from datetime import datetime, timezone
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from app.errors import ApiError
-
 
 def as_utc(value: datetime) -> datetime:
     """
@@ -57,6 +54,12 @@ def event_to_json(row: dict) -> dict:
         "spotsLeft": spots_left
     }
 
+def load_event(repository, event_id: int) -> dict:
+    """Return the event row, or raise 404 EVENT_NOT_FOUND."""
+    event = repository.get_event(event_id)
+    if event is None:
+        raise ApiError(404, "EVENT_NOT_FOUND", f"No event with id {event_id}.", {"eventId": event_id})
+    return event
 
 def parse_event_id(raw: str) -> int:
     """
@@ -78,6 +81,44 @@ def parse_event_id(raw: str) -> int:
         raise ApiError(404, "EVENT_NOT_FOUND", f"No event with id {raw}.", {"eventId": raw})
     return event_id
 
+def read_json_body() -> dict:
+    """Return the request body as a dict, or raise a 400 ApiError."""
+    body = request.get_json(silent=True)
+
+    if not isinstance(body, dict):
+        raise ApiError(400, "VALIDATION_ERROR", "Request body must be a JSON object",
+                       {"errors": [{"field": "body", "reason": "request body is not a JSON object."}]})
+    return body
+
+def check_time_order(row: dict, changes: dict) -> None:
+    """Raise a 400 if the merged startTime/endTime would not be in order."""
+
+    start = as_utc(changes.get("start_time", row["start_time"]))
+    end = as_utc(changes.get("end_time", row["end_time"]))
+
+    if end <= start:
+        raise ApiError(400, "VALIDATION_ERROR", f"Invalid start and end times. Start time: {start}, End time: {end}",
+                       {"errors": [{"field": "endTime",  "reason": "must be after startTime"}]})
+
+def check_capacity(event_id: int, changes: dict, repository) -> None:
+    """Raise a 409 if the new capacity is below the current registrations."""
+
+    new_cap = changes.get("capacity")
+    if new_cap is not None:
+        registered = repository.count_registrations(event_id)
+
+        if new_cap < registered:
+            raise ApiError(409, "CAPACITY_BELOW_REGISTRATIONS", f"Too many registrants. Club capacity: {new_cap}, Attempted registrants: {registered}",
+                           {"errors": [{"field": "capacity",  "reason": "num of registrants exceeds club capacity"}]})
+
+def check_no_registrations(event_id: int, repository) -> None:
+    """Raise a 409 if the event still has registrations."""
+
+    registered = repository.count_registrations(event_id)
+    if registered > 0:
+        raise ApiError(409, "EVENT_HAS_REGISTRATIONS", f"This event has {registered} registrants and so cannot be deleted.",
+                       {"eventId": event_id, "registeredCount": registered})
+
 def create_event_blueprint(repository):
     """
     Build the event routes around a repository.
@@ -91,7 +132,7 @@ def create_event_blueprint(repository):
     blueprint = Blueprint("events", __name__, url_prefix="/api/v1/events")
 
     @blueprint.get("")
-    def list_events():
+    def list_events(): # list_events() is referred to as a "flask view"
         """
         List all events.
 
@@ -123,9 +164,46 @@ def create_event_blueprint(repository):
             ApiError: 404 EVENT_NOT_FOUND if the id is invalid or no event has it.
         """
         parsed_id = parse_event_id(event_id)
-        row = repository.get_event(parsed_id)
-        if row is None:
-            raise ApiError(404, "EVENT_NOT_FOUND", f"No event with id {parsed_id}.", {"eventId": parsed_id})
-        return event_to_json(row)
+        return load_event(repository, parsed_id)
+
+    @blueprint.post("")
+    def create_event():
+        """
+        POST /api/v1/events creates an event.
+        """
+        body = read_json_body()
+        fields = validate_event_create(body) # TEMP: returns a clean dict; Precious' function
+        row = repository.create_event(fields["title"], fields["country"], fields["province"], fields["city"], 
+                                fields["address"], fields["start_time"], fields["end_time"], fields["capacity"])
+        row["registered_count"] = 0
+        response = jsonify(event_to_json(row))
+        response.status_code = 201
+        response.headers["Location"] = f"/api/v1/events/{row['id']}"
+        return response
+
+    @blueprint.patch("/<event_id>")
+    def update_event(event_id: str):
+        """PATCH /api/v1/events/<event_id> updates some fields of an event."""
+        parsed_id = parse_event_id(event_id)
+        body = read_json_body()
+        changes = validate_event_patch(body) # TEMP: Precious' function
+        row = load_event(repository, parsed_id)
+
+        check_time_order(row, changes)
+        check_capacity(parsed_id, changes, repository)
+
+        repository.update_event(parsed_id, changes)
+        return load_event(repository, parsed_id)
+
+    @blueprint.delete("/<event_id>")
+    def delete_event(event_id: str):
+        """DELETE /api/v1/events/<event_id> deletes an event with no registrations."""
+
+        parsed_id = parse_event_id(event_id)
+        load_event(repository, parsed_id)
+        
+        check_no_registrations(parsed_id, repository)
+        repository.delete_event(parsed_id)
+        return "", 204
 
     return blueprint
