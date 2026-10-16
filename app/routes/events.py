@@ -54,6 +54,12 @@ def event_to_json(row: dict) -> dict:
         "spotsLeft": spots_left
     }
 
+def load_event(repository, event_id: int) -> dict:
+    """Return the event row, or raise 404 EVENT_NOT_FOUND."""
+    event = repository.get_event(event_id)
+    if event is None:
+        raise ApiError(404, "EVENT_NOT_FOUND", f"No event with id {event_id}.", {"eventId": event_id})
+    return event
 
 def parse_event_id(raw: str) -> int:
     """
@@ -105,6 +111,13 @@ def check_capacity(event_id: int, changes: dict, repository) -> None:
             raise ApiError(409, "CAPACITY_BELOW_REGISTRATIONS", f"Too many registrants. Club capacity: {new_cap}, Attempted registrants: {registered}",
                            {"errors": [{"field": "capacity",  "reason": "num of registrants exceeds club capacity"}]})
 
+def check_no_registrations(event_id: int, repository) -> None:
+    """Raise a 409 if the event still has registrations."""
+
+    registered = repository.count_registrations(event_id)
+    if registered > 0:
+        raise ApiError(409, "EVENT_HAS_REGISTRATIONS", f"This event has {registered} registrants and so cannot be deleted.",
+                       {"eventId": event_id, "registeredCount": registered})
 
 def create_event_blueprint(repository):
     """
@@ -151,10 +164,7 @@ def create_event_blueprint(repository):
             ApiError: 404 EVENT_NOT_FOUND if the id is invalid or no event has it.
         """
         parsed_id = parse_event_id(event_id)
-        row = repository.get_event(parsed_id)
-        if row is None:
-            raise ApiError(404, "EVENT_NOT_FOUND", f"No event with id {parsed_id}.", {"eventId": parsed_id})
-        return event_to_json(row)
+        return load_event(repository, parsed_id)
 
     @blueprint.post("")
     def create_event():
@@ -177,15 +187,23 @@ def create_event_blueprint(repository):
         parsed_id = parse_event_id(event_id)
         body = read_json_body()
         changes = validate_event_patch(body) # TEMP: Precious' function
-        row = repository.get_event(parsed_id)
-        if row is None:
-            raise ApiError(404, "EVENT_NOT_FOUND", f"Could not find event with id {parsed_id}")
+        row = load_event(repository, parsed_id)
 
         check_time_order(row, changes)
         check_capacity(parsed_id, changes, repository)
 
         repository.update_event(parsed_id, changes)
-        event = repository.get_event(parsed_id)
-        return event_to_json(event)
+        return load_event(repository, parsed_id)
+
+    @blueprint.delete("/<event_id>")
+    def delete_event(event_id: str):
+        """DELETE /api/v1/events/<event_id> deletes an event with no registrations."""
+
+        parsed_id = parse_event_id(event_id)
+        load_event(repository, parsed_id)
+        
+        check_no_registrations(parsed_id, repository)
+        repository.delete_event(parsed_id)
+        return "", 204
 
     return blueprint

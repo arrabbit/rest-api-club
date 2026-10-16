@@ -55,6 +55,9 @@ class Fake:
         self.rows[event_id].update(changes)
         return {k: v for k, v in self.rows[event_id].items() if k != "registered_count"}
 
+    def delete_event(self, event_id):
+        del self.rows[event_id]
+
     def count_registrations(self, event_id):
         return self.rows[event_id]["registered_count"]
 
@@ -158,6 +161,16 @@ def main():
          client.patch(f"{base}/4", json={"capacity": 1}))
     show("PATCH /4 capacity 2 with 2 registered (expect 200, spotsLeft 0)",
          client.patch(f"{base}/4", json={"capacity": 2}))
+
+    # ---- DELETE (Step 6) ----
+    show("DELETE /99 (expect 404 EVENT_NOT_FOUND)", client.delete(f"{base}/99"))
+    show("DELETE /abc (expect 404 EVENT_NOT_FOUND)", client.delete(f"{base}/abc"))
+    show("DELETE /4 with 2 registered (expect 409 EVENT_HAS_REGISTRATIONS, details eventId 4 / registeredCount 2)",
+         client.delete(f"{base}/4"))
+    show("GET /4 afterwards (expect 200: the event must still exist)", client.get(f"{base}/4"))
+    fake.rows[4]["registered_count"] = 0   # everyone cancelled
+    show("DELETE /4 with 0 registered (expect 204 and an empty body)", client.delete(f"{base}/4"))
+    show("GET /4 afterwards (expect 404 EVENT_NOT_FOUND)", client.get(f"{base}/4"))
 
 
 if __name__ == "__main__":
